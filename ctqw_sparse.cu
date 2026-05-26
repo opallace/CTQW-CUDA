@@ -1,3 +1,5 @@
+#include <fstream>
+#include <sstream>
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -8,6 +10,73 @@
 
 using namespace std;
 
+struct Edge {
+    int u;
+    int v;
+    float w;
+};
+
+inline int idx(int row, int col, int n) {
+    // Layout column-major, compatível com cuSolver/cuBLAS.
+    return row + col * n;
+}
+
+std::vector<Edge> read_edges_from_file(const std::string& filename, int& n) {
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        throw std::runtime_error("Não foi possível abrir o arquivo: " + filename);
+    }
+
+    std::vector<Edge> edges;
+
+    int u;
+    int v;
+    float w;
+
+    int max_vertex = -1;
+
+    while (file >> u >> v >> w) {
+        edges.push_back({u, v, w});
+
+        max_vertex = std::max(max_vertex, u);
+        max_vertex = std::max(max_vertex, v);
+    }
+
+    n = max_vertex + 1;
+
+    return edges;
+}
+
+std::vector<cuFloatComplex> build_dense_laplacian_from_edges(
+    int n,
+    const std::vector<Edge>& edges
+) {
+    std::vector<cuFloatComplex> L(
+        n * n,
+        make_cuFloatComplex(0.0f, 0.0f)
+    );
+
+    for (const auto& edge : edges) {
+        int u = edge.u;
+        int v = edge.v;
+        float w = edge.w;
+
+        // Off-diagonal do Laplaciano: L_uv = L_vu = -w
+        L[idx(u, v, n)] = make_cuFloatComplex(-w, 0.0f);
+        L[idx(v, u, n)] = make_cuFloatComplex(-w, 0.0f);
+
+        // Diagonal: grau ponderado
+        float degree_u = cuCrealf(L[idx(u, u, n)]) + std::abs(w);
+        float degree_v = cuCrealf(L[idx(v, v, n)]) + std::abs(w);
+
+        L[idx(u, u, n)] = make_cuFloatComplex(degree_u, 0.0f);
+        L[idx(v, v, n)] = make_cuFloatComplex(degree_v, 0.0f);
+    }
+
+    return L;
+}
+
 int main(){
 	/* Dimensão da matriz Hermitiana/Laplaciana
 	 */
@@ -17,40 +86,23 @@ int main(){
 	 */
 	float t = 1;
 
-	/* Matriz Hermitiana/Laplaciana com
-	 * dimensões NxN e seus valores zerados.
-	 */
-	vector<cuFloatComplex> L(n * n, make_cuFloatComplex(.0f, .0f));
+	std::string filename = "output_ctqw2.txt";
 
-	/* Define os valores da matriz Hermitiana/Laplaciana
-	 * de forma simétrica correspondente as adjacências
-	 * de um grafo.
-	 */
-	for(int i = 0; i < n; i++){
-		for(int j = i + 1; j < n; j++){
-			int value = rand() % 2 - 1;
-			L[i * n + j] = make_cuFloatComplex(value, .0f);
-			L[j * n + i] = make_cuFloatComplex(value, .0f);
-		}
-	}
+    std::vector<Edge> edges;
+    {
+        int inferred_n = 0;
+        edges = read_edges_from_file("output_ctqw2.txt", inferred_n);
 
-	/* Define os valores da diagonal principal
-	 * da matriz Hermitiana/Laplaciana correspondente
-	 * ao grau do vértice.
-	 * 
-	 * Da para otimizar essa definição sem ter que percorrer
-	 * todos os valores, apenas os elementos acima ou abaixo
-	 * da diagonal
-	 */
-	for(int i = 0; i < n; i++){
-		float degree = .0f;
+        if (inferred_n > n) {
+            throw std::runtime_error("O arquivo possui vértices com índice >= 5000.");
+        }
+    }
 
-		for(int j = 0; j < n; j++){
-			degree += cuCabsf(L[i * n + j]);
-		}
-		
-		L[i * n + i] = make_cuFloatComplex(degree, .0f);
-	}
+
+    std::cout << "n = " << n << "\n";
+    std::cout << "edges = " << edges.size() << "\n";
+
+    std::vector<cuFloatComplex> L = build_dense_laplacian_from_edges(n, edges);
 
 	/* Aloca espaço na memória da placa de video para
 	 * armazenar os autovalores e autovetores calculados.
@@ -117,7 +169,7 @@ int main(){
 	 */
 	vector<float> hEigenvalues(n);
 	vector<cuComplex> hEigenvectors(n * n);
-        cudaMemcpy(hEigenvalues.data(), dEigenvalues, sizeof(float) * n, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hEigenvalues.data(), dEigenvalues, sizeof(float) * n, cudaMemcpyDeviceToHost);
 	cudaMemcpy(hEigenvectors.data(), dEigenvectors, sizeof(cuComplex) * n * n, cudaMemcpyDeviceToHost);
 
 	/* Aloca algumas variavéis para calculo da evolução temporal
@@ -166,13 +218,13 @@ int main(){
 
     printf("ψ(%.3f):\n", t);
 
-    for(int i = 0; i < n; i++){
-        float re   = cuCrealf(psi_t[i]);
-        float im   = cuCimagf(psi_t[i]);
-        float prob = re * re + im * im;
+    // for(int i = 0; i < n; i++){
+    //     float re   = cuCrealf(psi_t[i]);
+    //     float im   = cuCimagf(psi_t[i]);
+    //     float prob = re * re + im * im;
 
-        printf("  node %d: (%.4f, %.4f), |ψ|² = %.4f\n", i, re, im, prob);
-    }
+    //     printf("  node %d: (%.4f, %.4f), |ψ|² = %.4f\n", i, re, im, prob);
+    // }
 
 	/* Libera espaço de memória alocado durante
 	 * a execução do programa.
